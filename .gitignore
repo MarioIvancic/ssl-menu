@@ -1,0 +1,5 @@
+CA
+doc
+*.key
+*.csr
+*.crt

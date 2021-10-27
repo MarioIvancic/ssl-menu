@@ -1,0 +1,1663 @@
+#!/usr/bin/perl -w
+
+#########################    MENU ENGINE CODE    #########################
+
+use File::Temp qw/ tempfile /;
+use Data::Dumper;
+
+my $current_menu;
+my $current_index;
+
+sub get_input();
+sub print_edit;
+sub switch_menu($);
+sub switch_menu_back();
+sub set_value;
+sub get_value;
+
+
+#########################    APPLICATION CODE    #########################
+
+my $version = 'v1.0.0';
+
+sub print_help
+{
+	my $msg = "
+This is a simple Perl script for SSL certificate management. 
+It is a wrapper around openssl tool.
+Features:
+    - make simple CA
+    - make CSR and KEY for signing by this or some other CA
+    - make self-signed certificate
+    - sign CSR by this CA
+    - convert KEY, CSR, CRT from various formats to other formats
+    - print KEY, CSR, CRT to console
+    
+Default encoding is PEM for all KEY, CSR, CRT, but DER can be used too.
+Certificate can also be converted to/from PKCS#12 encoding.
+Files will have extensions key, pub.key, crt, csr, depending on file type.
+
+CA KEY will be 4096 bit RSA key. All other keys will default to 2048 bits 
+RSA keys, but can be any of 512, 1024, 2048, 4096 bits for RSA ans DSA
+or 256 bits for EC and ED.
+
+Conversion from CRT to CSR is not fully functional in openssl v1.x.x.
+";
+    print "ssl-menu version $version\n";
+    print $msg;
+}
+
+
+=pod
+
+Openssl commands
+
+print KEY:
+openssl pkey -text -noout -in $key
+
+print CRT
+openssl x509 -text -noout -in $crt
+
+print CSR
+openssl req -text -noout -in $csr
+    
+convert KEY from PEM/DER to DER/PEM
+openssl pkey -inform $infmt -in $inkey -outform $outfmt -out $outkey
+
+convert CSR from PEM/DER to DER/PEM
+openssl req -inform $infmt -in $incsr -outform $outfmt -out $outcsr
+
+convert CSR from PEM to P12
+openssl pkcs12 -export -name $name -inkey $inkey -in $incrt -out $outcrt
+
+convert CRT from p12 to PEM
+openssl pkcs12 -nocerts -nodes -in $incrt -out $outkey
+openssl pkcs12 -nokeys -clcerts -in $incrt -out $outcrt
+
+convert CRT from PEM/DER to DER/PEM
+openssl req -inform $infmt -in $incrt -outform $outfmt -out $outcrt
+
+convert CRT to CSR
+openssl x509 -x509toreq -extfile $fn -extensions crt_ext -inform PEM -in $crt -signkey $key -outform PEM -out $csr
+
+make new KEY
+openssl pkey -inform $fmt -outform $fmt -in $key -pubout $opts -out $pubkey
+
+make new CSR
+openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out $csr $key
+
+make new CA
+openssl req -x509 -config $fn -sha256 -new -newkey rsa:4192 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
+
+make new CRT
+openssl req -x509 -config $fn -extensions req_ext -outform PEM -in $csr -key $key -nodes -nameopt utf8 -utf8 -days $days -out $crt
+openssl x509 -req -extfile $fn -extensions req_ext -outform PEM -in $csr -CA $ca_dir/$ca_cer -CAkey $ca_dir/$ca_key -CAcreateserial -days $days -out $crt
+
+=cut
+
+
+
+my $ca_dir = 'CA';
+my $ca_key = 'ca.key';
+my $ca_cer = 'ca.cer';
+
+my %file_extensions =
+(
+    'PEM' => 'pem',
+    'DER' => 'der',
+    'PKCS#12' => 'p12',
+    'PKCS#7' => 'p7b',
+);
+
+
+my %yes_no_menu =
+(
+    'name' => 'Yes / No',
+    'entries' =>
+    [
+        {'name' => 'Yes', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'yes'},
+        {'name' => 'No', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'no'},
+    ],
+);
+
+
+
+my %symmetric_alg_menu =
+(
+    'name' => 'Algorithm',
+    'entries' =>
+    [
+        {'name' => 'DES3', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'des3'},
+        {'name' => 'AES128', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'aes128'},
+        {'name' => 'AES192', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'aes192'},
+        {'name' => 'AES256', 'sub' => sub{ set_value(shift); switch_menu_back(); }, 'arg' => 'aes256'},
+    ],
+);
+
+
+my %password_menu =
+(
+    'name' => 'Password',
+    'entries' =>
+    [
+        {'name' => 'Alg', 'sub' => \&switch_menu, 'arg' => \%symmetric_alg_menu},
+        {'name' => 'Pass', 'sub' => \&set_password, 'arg' => undef},
+    ],
+);
+
+
+my %key_type_menu =
+(
+    'name' => 'Key type menu',
+    'entries' =>
+    [
+        {'name' => 'RSA, 512  bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 512'},
+        {'name' => 'RSA, 1024 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 1024'},
+        {'name' => 'RSA, 2048 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 2048'},
+        {'name' => 'RSA, 4096 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'RSA, 4096'},
+
+        {'name' => 'DSA, 1024 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DSA, 1024'},
+        {'name' => 'DSA, 2048 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DSA, 2048'},
+        {'name' => 'DSA, 4096 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DSA, 4096'},
+
+        {'name' => 'ED25519, 256 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ED25519, 256'},
+    ],
+);
+
+
+my %key_menu =
+(
+    'name' => 'Key menu',
+    'entries' =>
+    [
+        {'name' => 'Make key', 'sub' => \&make_new_key, 'arg' => undef},
+        {'name' => 'Set key type', 'sub' => \&switch_menu, 'arg' => \%key_type_menu},
+        {'name' => 'Save pub key', 'sub' => \&switch_menu, 'arg' => \%yes_no_menu},
+        {'name' => 'Set password', 'sub' => \&switch_menu, 'arg' => \%password_menu},
+    ],
+);
+
+
+
+my %crt_type_menu =
+(
+    'name' => 'CRT type menu',
+    'entries' =>
+    [
+        {'name' => 'Server', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'server'},
+        {'name' => 'Client', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'client'},
+        {'name' => 'OpenVPN Server', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'openvpn-server'},
+        {'name' => 'OpenVPN Client', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'openvpn-client'},
+        {'name' => 'OCSP Signing', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ocsp-signing'},
+    ],
+);
+
+
+
+my %csr_menu =
+(
+    'name' => 'Csr menu',
+    'entries' =>
+    [
+        {'name' => 'Make CSR', 'sub' => \&make_new_csr, 'arg' => undef},
+        {'name' => 'Set CSR type', 'sub' => \&switch_menu, 'arg' => \%crt_type_menu},
+        {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
+    ],
+);
+
+
+
+my %crt_menu =
+(
+    'name' => 'Crt menu',
+    'entries' =>
+    [
+        {'name' => 'Make selfsigned CRT', 'sub' => \&make_new_crt, 'arg' => 'selfsigned'},
+        {'name' => 'Make CRT', 'sub' => \&make_new_crt, 'arg' => undef},
+        {'name' => 'Load CSR', 'sub' => sub { set_value(print_edit('CSR'), $current_menu); }, 'arg' => undef},
+    ],
+);
+
+
+my %format_menu =
+(
+    'name' => 'Format menu',
+    'entries' =>
+    [
+        {'name' => 'PEM', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PEM'},
+        {'name' => 'DER', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DER'},
+        {'name' => 'PKCS#7', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PKCS#7'},
+        {'name' => 'PKCS#12', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PKCS#12'},
+    ],
+);
+
+my %pem_der_format_menu =
+(
+    'name' => 'Format menu',
+    'entries' =>
+    [
+        {'name' => 'PEM', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'PEM'},
+        {'name' => 'DER', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DER'},
+    ],
+);
+
+
+my %convert_key_menu =
+(
+    'name' => 'Convert KEY menu',
+    'entries' =>
+    [
+        {'name' => 'Convert KEY', 'sub' => \&convert_key, 'arg' => undef},
+        {'name' => 'Set input format', 'sub' => \&switch_menu, 'arg' => \%pem_der_format_menu},
+        {'name' => 'Set output format', 'sub' => \&switch_menu, 'arg' => \%pem_der_format_menu},
+    ],
+);
+
+
+my %convert_crt_menu =
+(
+    'name' => 'Convert CRT menu',
+    'entries' =>
+    [
+        {'name' => 'Convert CRT', 'sub' => \&convert_crt, 'arg' => undef},
+        {'name' => 'Set input format', 'sub' => \&switch_menu, 'arg' => \%format_menu},
+        {'name' => 'Set output format', 'sub' => \&switch_menu, 'arg' => \%format_menu},
+    ],
+);
+
+
+my %convert_csr_menu =
+(
+    'name' => 'Convert CSR menu',
+    'entries' =>
+    [
+        {'name' => 'Convert CSR', 'sub' => \&convert_csr, 'arg' => undef},
+        {'name' => 'Set input format', 'sub' => \&switch_menu, 'arg' => \%pem_der_format_menu},
+        {'name' => 'Set output format', 'sub' => \&switch_menu, 'arg' => \%pem_der_format_menu},
+    ],
+);
+
+
+my %convert_crt_to_csr_menu =
+(
+    'name' => 'Convert CRT to CSR menu',
+    'entries' =>
+    [
+        {'name' => 'Convert CRT to CSR', 'sub' => \&convert_crt_to_csr, 'arg' => undef},
+        {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
+    ],
+);
+
+my %convert_menu =
+(
+    'name' => 'Convert menu',
+    'entries' =>
+    [
+        {'name' => 'Convert KEY', 'sub' => \&switch_menu, 'arg' => \%convert_key_menu},
+        {'name' => 'Convert CRT', 'sub' => \&switch_menu, 'arg' => \%convert_crt_menu},
+        {'name' => 'Convert CSR', 'sub' => \&switch_menu, 'arg' => \%convert_csr_menu},
+        {'name' => 'Convert CRT to CSR', 'sub' => \&switch_menu, 'arg' => \%convert_crt_to_csr_menu},
+    ],
+);
+
+
+my %print_menu = 
+(
+    'name' => 'Print menu',
+    'entries' =>
+    [
+        {'name' => 'Print CRT', 'sub' => \&print_crt, 'arg' => undef},
+        {'name' => 'Print CSR', 'sub' => \&print_csr, 'arg' => undef},
+        {'name' => 'Print KEY', 'sub' => \&print_key, 'arg' => undef},
+        {'name' => 'Print CA', 'sub' => \&print_ca, 'arg' => undef},
+    ],
+);
+
+
+my %main_menu = 
+(
+    'name' => 'Main menu',
+    'entries' =>
+    [
+        {'name' => 'New CRT', 'sub' => \&switch_menu, 'arg' => \%crt_menu},
+        {'name' => 'New CSR', 'sub' => \&switch_menu, 'arg' => \%csr_menu},
+        {'name' => 'New KEY', 'sub' => \&switch_menu, 'arg' => \%key_menu},
+        {'name' => 'New CA', 'sub' => \&make_new_ca, 'arg' => undef},
+        {'name' => 'Print', 'sub' => \&switch_menu, 'arg' => \%print_menu},
+        {'name' => 'Convert', 'sub' => \&switch_menu, 'arg' => \%convert_menu},
+        {'name' => 'Help', 'sub' => \&print_help, 'arg' => undef},
+    ],
+);
+
+
+
+sub set_password
+{
+    my $alg = get_value(0) || 'AES128';
+    my $pass = print_edit('Password');
+    set_value($pass);
+    switch_menu_back();
+}
+
+
+# ask questions and get and return distinguished name as a hash
+sub get_dn
+{
+    my $fields = shift;
+    $fields = 'C, ST, L, O, OU, CN, SAN, EA,' if(!$fields);
+    $fields .= ',' if(! $fields =~ /, *$/);
+    $fields =~ s/ //g;
+    
+    my %DN = ();
+    
+    print "
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+";
+    
+    my $tmp;
+    
+    if($fields =~ /C,/)
+    {
+        $tmp = print_edit('Country Name (2 letter code)', 'AU');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'C'} = $tmp;
+    }
+    
+    if($fields =~ /ST,/)
+    {
+        $tmp = print_edit('State or Province Name (full name)', 'Some-State');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'ST'} = $tmp;
+    }
+    
+    if($fields =~ /L,/)
+    {
+        $tmp = print_edit('Locality Name (eg, city)');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'L'} = $tmp;
+    }
+
+    if($fields =~ /O,/)
+    {
+        $tmp = print_edit('Organization Name (eg, company)', 'Example Ltd');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'O'} = $tmp;
+    }
+    
+    if($fields =~ /OU,/)
+    {
+        $tmp = print_edit('Organizational Unit Name (eg, section)');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'OU'} = $tmp;
+    }
+    
+    if($fields =~ /CN,/)
+    {
+        $tmp = print_edit('Common Name (e.g. server FQDN or YOUR name)');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'CN'} = $tmp;
+    }
+    
+    if($fields =~ /SAN,/)
+    {
+        $tmp = print_edit('Alternate Names (e.g. DNS name or IP, comma separated)');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'SAN'} = $tmp;
+    }
+    
+    if($fields =~ /EA,/)
+    {
+        $tmp = print_edit('Email Address');
+        $tmp = undef if($tmp eq '' or $tmp eq '.');
+        $DN{'EA'} = $tmp;
+    }
+    
+    return %DN;
+}
+
+
+sub print_key
+{
+    my $key = shift;
+    
+    $key = print_edit('KEY') if(!$key);
+    if(!$key)
+    {
+        print "\nError: Invalid KEY name '$key'!\n";
+        return undef;
+    }
+    
+    $key = "$key.key" if($key !~ /\.key$/);
+    
+    if(! -f $key)
+    {
+        print "\nError: Failed to load KEY file '$key'!\n";
+        return undef;
+    }
+    
+    my $cmd = "openssl pkey -text -noout -in '$key'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "\n$tmp\n";
+    switch_menu_back();
+    return $key;
+}
+
+
+sub print_crt
+{
+    my $crt = shift;
+    
+    $crt = print_edit('CRT') if(!$crt);
+    if(!$crt)
+    {
+        print "\nError: Invalid CRT name '$crt'!\n";
+        return undef;
+    }
+    
+    $crt = "$crt.crt" if($crt !~ /\.crt$/);
+    
+    if(! -f $crt)
+    {
+        print "\nError: Failed to load CRT file '$crt'!\n";
+        return undef;
+    }
+    
+    my $cmd = "openssl x509 -text -noout -in '$crt'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "\n$tmp\n";
+    switch_menu_back();
+    return $crt;
+}
+
+
+sub print_csr
+{
+    my $csr = shift;
+    
+    $csr = print_edit('CSR') if(!$csr);
+    if(!$csr)
+    {
+        print "\nError: Invalid CSR name '$csr'!\n";
+        return undef;
+    }
+    
+    $csr = "$csr.csr" if($csr !~ /\.csr$/);
+    
+    if(! -f $csr)
+    {
+        print "\nError: Failed to load CSR file '$csr'!\n";
+        return undef;
+    }
+    
+    my $cmd = "openssl req -text -noout -in '$csr'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd`;
+    print "\n$tmp\n";
+    switch_menu_back();
+    return $csr;
+}
+
+
+sub convert_key
+{
+    my $inkey = shift;
+    my $infmt = get_value(1) || 'PEM';
+    my $outfmt = get_value(2) || 'PEM';
+    my $outkey;
+    my $outext = $file_extensions{$outfmt} || 'pem';
+    
+    $inkey = print_edit('KEY') if(!$inkey);
+    if(!$inkey)
+    {
+        print "\nError: Invalid KEY name '$inkey'!\n";
+        return undef;
+    }
+    
+    $inkey = "$inkey.key" if($inkey !~ /\.key$/);
+    
+    if(! -f $inkey)
+    {
+        print "\nError: Failed to load KEY file '$inkey'!\n";
+        return undef;
+    }
+    
+    $outkey = $inkey;
+    $outkey =~ s/key$/$outext/;
+    
+    my $cmd = "openssl pkey -inform '$infmt' -in '$inkey' -outform '$outfmt' -out '$outkey'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outkey)
+    {
+        print "\nError: Failed to create KEY file '$outkey'!\n";
+        return undef;
+    }
+    
+    print "\nCreated KEY file '$outkey'!\n";
+    switch_menu_back();
+    return $outkey;
+}
+
+
+sub convert_csr
+{
+    my $incsr = shift;
+    my $infmt = get_value(1) || 'PEM';
+    my $outfmt = get_value(2) || 'PEM';
+    my $outcsr;
+    my $outext = $file_extensions{$outfmt} || 'pem';
+    
+    $incsr = print_edit('CSR') if(!$incsr);
+    if(!$incsr)
+    {
+        print "\nError: Invalid CSR name '$incsr'!\n";
+        return undef;
+    }
+    
+    $incsr = "$incsr.csr" if($incsr !~ /\.csr$/);
+    
+    if(! -f $incsr)
+    {
+        print "\nError: Failed to load CSR file '$incsr'!\n";
+        return undef;
+    }
+    
+    $outcsr = $incsr;
+    $outcsr =~ s/csr$/$outext/;
+    
+    my $cmd = "openssl req -inform '$infmt' -in '$incsr' -outform '$outfmt' -out '$outcsr'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outcsr)
+    {
+        print "\nError: Failed to create CSR file '$outcsr'!\n";
+        return undef;
+    }
+    
+    print "\nCreated CSR file '$outcsr'!\n";
+    switch_menu_back();
+    return $outcsr;
+}
+
+
+
+sub convert_crt_to_p12
+{
+    my $incrt = shift;
+    my $inkey;
+    my $outcrt;
+    my $name;
+    
+    $incrt = print_edit('CRT') if(!$incrt);
+    if(!$incrt)
+    {
+        print "\nError: Invalid CRT name '$incrt'!\n";
+        return undef;
+    }
+    
+    $incrt = "$incrt.crt" if($incsr !~ /\.crt$/);
+    
+    if(! -f $incrt)
+    {
+        print "\nError: Failed to load CRT file '$incrt'!\n";
+        return undef;
+    }
+    
+    $outcrt = $incrt;
+    $outcrt =~ s/crt$/p12/;
+    
+    if(-f $outcrt)
+    {
+        print "\nError: CRT file '$outcrt' already exists!\n";
+        return undef;
+    }
+    
+    $inkey = $incrt;
+    $inkey =~ s/crt$/key/;
+    $inkey = print_edit('KEY', $inkey);
+    
+    $name = $incrt;
+    $name =~ s/\.crt$//;
+    $name = print_edit('Name', $name);
+    
+    if(! -f $inkey)
+    {
+        print "\nError: Failed to load KEY file '$incrt'!\n";
+        return undef;
+    }
+
+    my $cmd = "openssl pkcs12 -export -name '$name' -inkey '$inkey' -in '$incrt' -out '$outcrt'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outcrt)
+    {
+        print "\nError: Failed to create CRT file '$outcrt'!\n";
+        return undef;
+    }
+    
+    print "\nCreated CRT file '$outcrt'!\n";
+    switch_menu_back();
+    return $outcrt;
+}
+
+
+sub convert_crt_from_p12
+{
+    my $incrt = shift;
+    my $outcrt;
+    
+    $incrt = print_edit('CRT') if(!$incrt);
+    if(!$incrt)
+    {
+        print "\nError: Invalid CRT name '$incrt'!\n";
+        return undef;
+    }
+    
+    $incrt = "$incrt.p12" if($incsr !~ /\.p12$/);
+    
+    if(! -f $incrt)
+    {
+        print "\nError: Failed to load CRT file '$incrt'!\n";
+        return undef;
+    }
+    
+    $outcrt = $incrt;
+    $outcrt =~ s/p12$/crt/;
+    
+    if(-f $outcrt)
+    {
+        print "\nError: CRT file '$outcrt' already exists!\n";
+        return undef;
+    }
+    
+    my $outkey = $incrt;
+    $outkey =~ s/p12$/key/;
+    
+    if(-f $outkey)
+    {
+        print "\nError: KEY file '$outkey' already exists!\n";
+        return undef;
+    }
+    
+    my $cmd = "openssl pkcs12 -nocerts -nodes -in '$incrt' -out '$outkey'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    $cmd = "openssl pkcs12 -nokeys -clcerts -in '$incrt' -out '$outcrt'";
+    print "\nRunning: $cmd\n";
+    $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outcrt or ! -f $outkey)
+    {
+        print "\nError: Failed to create CRT file '$outcrt' and/or KEY file '$outkey'!\n";
+        return undef;
+    }
+    
+    print "\nCreated CRT file '$outcrt' and KEY file '$outkey'!\n";
+    print "\nNote: you have to edit output files and delete metadata!\n";
+    switch_menu_back();
+    return $outcrt;
+}
+
+
+sub convert_crt
+{
+    my $incrt = shift;
+    my $infmt = get_value(1) || 'PEM';
+    my $outfmt = get_value(2) || 'PEM';
+    my $outcrt;
+    my $outext = $file_extensions{$outfmt} || 'pem';
+    
+    if($infmt eq 'PKCS#12')
+    {
+        if($outfmt ne 'PEM')
+        {
+            print "\nError: PKCS#12 can only be converted to PEM!\n";
+            return undef;
+        }
+        return convert_crt_from_p12($incrt);
+    }
+    
+    if($outfmt eq 'PKCS#12')
+    {
+        if($infmt ne 'PEM')
+        {
+            print "\nError: only PEM can be converted to PKCS#12!\n";
+            return undef;
+        }
+        return convert_crt_to_p12($incrt);
+    }
+    
+    if($infmt eq 'PKCS#7' or $outfmt eq 'PKCS#7')
+    {
+        print "\nError: conversion to/from PKCS#7 is not supported yet!\n";
+        return undef;
+    }
+    
+    $incrt = print_edit('CRT') if(!$incrt);
+    if(!$incrt)
+    {
+        print "\nError: Invalid CRT name '$incrt'!\n";
+        return undef;
+    }
+    
+    $incrt = "$incrt.crt" if($incsr !~ /\.crt$/);
+    
+    if(! -f $incrt)
+    {
+        print "\nError: Failed to load CRT file '$incrt'!\n";
+        return undef;
+    }
+    
+    $outcrt = $incrt;
+    $outcrt =~ s/crt$/$outext/;
+    
+    my $cmd = "openssl req -inform '$infmt' -in '$incrt' -outform '$outfmt' -out '$outcrt'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    if(! -f $outcrt)
+    {
+        print "\nError: Failed to create CRT file '$outcrt'!\n";
+        return undef;
+    }
+    
+    print "\nCreated CRT file '$outcrt'!\n";
+    switch_menu_back();
+    return $outcrt;
+}
+
+sub convert_crt_to_csr
+{
+    my $crt = shift;
+    my $key = get_value(1);
+    my $csr;
+    
+    $crt = print_edit('CRT') if(!$crt);
+    if(!$crt)
+    {
+        print "\nError: Invalid CRT name '$crt'!\n";
+        return undef;
+    }
+    
+    $crt = "$crt.crt" if($crt !~ /\.crt$/);
+    
+    if(! -f $crt)
+    {
+        print "\nError: Failed to load CRT file '$crt'!\n";
+        return undef;
+    }
+    
+    if(!$key)
+    {
+        $key = $crt;
+        $key =~ s/crt$/key/;
+    }
+    $key = "$key.key" if($key !~ /\.key$/);
+    
+    $csr = $crt;
+    $csr =~ s/crt$/csr/;
+    if(-f $csr)
+    {
+        print "\nError: CSR file '$csr' already exists!\n";
+        return undef;
+    }
+    
+    if(! -f $key)
+    {
+        my $cmd = "openssl genpkey -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out '$key'";
+        print "\nRunning: $cmd\n";
+        my $tmp = `$cmd 2>&1`;
+        if(! -f $key)
+        {
+            print "\nError: Failed to create KEY file '$key'!\n";
+            return undef;
+        }
+        
+        print "\nCreated KEY file '$key'!\n";
+    }
+    
+    my $cfg = '[ crt_ext ]' . parse_pem_get_ext($crt);
+    my ($fh, $fn) = tempfile();
+    print $fh $cfg;
+    close $fh;
+# print "\nCFG: \n$cfg\n";
+    
+    # this does not work as expected, -extfile and -extensions are ignored when -x509toreq is used.
+    my $cmd = "openssl x509 -x509toreq -extfile $fn -extensions crt_ext -inform PEM -in '$crt' -signkey '$key' -outform PEM -out '$csr'";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    unlink($fn);
+    
+    if(! -f $csr)
+    {
+        print "\nError: Failed to create CSR file '$csr'!\n";
+        return undef;
+    }
+    
+    print "\nCreated CSR file '$csr'!\n";
+    switch_menu_back();
+    return $csr;
+}
+
+sub make_new_key
+{
+    my $key = shift;
+    my ($alg, $len) = split(/, /, get_value(1) || 'RSA, 2048');
+    my $fmt = 'PEM';
+    my $save_pub = get_value(2) || 'no';
+    my $symmalg = get_value(3, 0) || 'AES128';
+    my $pass = get_value(3);
+    $save_pub = ($save_pub eq 'yes') ? 1 : 0;
+    my $pubkey;
+    
+    # print "\nUsing keylength $len for alg $alg and format $fmt. Save public key: $save_pub, symmalg $symmalg, pass $pass\n";
+    
+    $key = print_edit('KEY') if(!$key);
+    if(!$key)
+    {
+        print "\nError: Invalid KEY name '$key'!\n";
+        return undef;
+    }
+    
+    if($key =~ /\.key$/){}
+    else { $key = "$key.key"; }
+    
+    if(-f $key)
+    {
+        print "\nError: KEY file '$key' already exists!\n";
+        return undef;
+    }
+    
+    if($save_pub)
+    {
+        $pubkey = $key;
+        $pubkey =~ s/key$/pub.key/;
+        if(-f $pubkey)
+        {
+            print "\nError: public KEY file '$pubkey' already exists!\n";
+            return undef;
+        }
+    }
+    
+    my $opts = '';
+    
+    if($alg eq 'RSA')
+    {
+        $opts .= " -pkeyopt rsa_keygen_bits:$len";
+    }
+    elsif($alg eq 'DSA')
+    {
+        $opts .= " -pkeyopt dsa_paramgen_bits:$len";
+    }
+    
+    my $fn;
+    if($pass)
+    {
+        my $fh;
+        ($fh, $fn) = tempfile();
+        print $fh $pass;
+        close $fh;
+        
+        $opts .= " -pass file:$fn -$symmalg";
+    }
+    
+    my $cmd = "openssl genpkey -outform $fmt -algorithm $alg $opts -out '$key'";
+    print "\nRunning: $cmd\n";
+    $tmp = `$cmd 2>&1`;
+    
+    if(! -f $key)
+    {
+        print "\nError: Failed to create KEY file '$key'!\n";
+        unlink($fn) if($pass);
+        switch_menu_back();
+        return undef;
+    }
+    
+    print "\nCreated KEY file '$key'!\n";
+    
+    if($save_pub)
+    {
+        $opts = '';
+        $opts .= " -passin file:$fn -$symmalg" if($pass);
+        
+        # openssl rsa -in yourdomain.key -pubout -out yourdomain_public.key
+        $cmd = "openssl pkey -inform $fmt -outform $fmt -in '$key' -pubout $opts -out '$pubkey'";
+        
+        print "\nRunning: $cmd\n";
+        $tmp = `$cmd 2>&1`;
+        
+        if(! -f $pubkey)
+        {
+            print "\nError: Failed to create public KEY file '$pubkey'!\n";
+            unlink($fn) if($pass);
+            switch_menu_back();
+            return undef;
+        }
+        
+        print "\nCreated public KEY file '$pubkey'!\n";
+    }
+    
+    unlink($fn) if($pass);
+    
+    switch_menu_back();
+    return $key;
+}
+
+
+
+sub make_new_csr
+{
+    my $csr = shift;
+    my $type = get_value(1) || 'server';
+    my $key = get_value(2);
+
+    $csr = print_edit('CSR') if(!$csr);
+    if(!$csr)
+    {
+        print "\nError: Invalid CSR name '$csr'!\n";
+        return undef;
+    }
+    
+    if($csr =~ /\.csr$/){}
+    else { $csr = "$csr.csr"; }
+    
+    if(-f $csr)
+    {
+        print "\nError: CSR file '$csr' already exists!\n";
+        return undef;
+    }
+    
+    if($key)
+    {
+        if($key !~ /\.key$/){ $key = "$key.key"; }
+        
+        if(! -f $key)
+        {
+            print "\nError: Failed to load KEY file '$key'\n";
+            return undef;
+        }
+        $key = "-key '$key'";
+    }
+    else
+    {
+        $key = $csr;
+        $key =~ s/csr$/key/;
+        if(-f $key)
+        {
+            print "\nError: KEY file '$key' already exists\n";
+            return undef;
+        }
+        $key = "-newkey rsa:2048 -keyout '$key'";
+    }
+    
+    my %dn = get_dn();
+    my $san = $dn{'SAN'};
+    
+    # prepare configuration file for CSR
+    my $cfg = "
+[ req ]
+default_md = sha256
+req_extensions = req_ext
+prompt = no
+distinguished_name = req_distinguished_name
+
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+
+[ req_distinguished_name ]
+";
+    $cfg .= "countryName = $dn{'C'}\n" if(defined $dn{'C'});
+    $cfg .= "stateOrProvinceName = $dn{'ST'}\n" if(defined $dn{'ST'});
+    $cfg .= "localityName = $dn{'L'}\n" if(defined $dn{'L'});
+    $cfg .= "organizationName = $dn{'O'}\n" if(defined $dn{'O'});
+    $cfg .= "organizationalUnitName = $dn{'OU'}\n" if(defined $dn{'OU'});
+    $cfg .= "commonName = $dn{'CN'}\n" if(defined $dn{'CN'});
+    $cfg .= "emailAddress = $dn{'EA'}\n" if(defined $dn{'EA'});
+
+    $cfg .= "[ req_ext ]";
+
+    if($type eq 'server')
+    {
+        $cfg .= "
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+basicConstraints=critical,CA:false";
+    }
+    elsif($type eq 'client')
+    {
+        $cfg .= "
+keyUsage=digitalSignature
+extendedKeyUsage=clientAuth
+basicConstraints=critical,CA:false";
+    }
+    elsif($type eq 'openvpn-server')
+    {
+        $cfg .= "
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+basicConstraints=CA:false";
+    }
+    elsif($type eq 'openvpn-client')
+    {
+        $cfg .= "
+keyUsage=digitalSignature
+extendedKeyUsage=clientAuth
+basicConstraints=CA:false";
+    }
+    elsif($type eq 'ocsp-signing')
+    {
+        $cfg .= "
+keyUsage=critical,digitalSignature
+extendedKeyUsage=critical,OCSPSigning
+basicConstraints=critical,CA:false";
+    }
+    
+    if($san)
+    {
+        $cfg .= '
+subjectAltName = @alt_names
+[ alt_names ]
+';
+        my $ip = 0;
+        my $dns = 0;
+        
+        $san = "$dn{'CN'}," . $san;
+        
+        my @sc = split(/, */, $san);
+        
+        foreach $san (@sc)
+        {
+            if($san =~ /^\d+\.\d+\.\d+\.\d+$/)
+            {
+                $cfg .= "IP.$ip = $san\n";
+                $ip++;
+            }
+            else
+            {
+                $cfg .= "DNS.$dns = $san\n";
+                $dns++;
+            }
+        }
+    }
+    
+ # print "CFG: $cfg\n\n";
+
+    my ($fh, $fn) = tempfile();
+    print $fh $cfg;
+    close $fh;
+    
+    my $cmd = "openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out '$csr' $key";
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    
+    unlink($fn);
+    
+    if(! -f $csr)
+    {
+        print "\nError: Failed to create CSR file\n";
+        return undef;
+    }
+    
+    print "\nCreated CSR file\n";
+    switch_menu_back();
+    return $csr;
+}
+
+
+
+sub print_ca
+{
+    my $cmd = "openssl x509 -text -noout -in $ca_dir/$ca_cer";
+    print "\nRunning: $cmd\n";
+    my $cer = `$cmd`;
+    print "$cer\n";
+}
+
+
+
+sub make_new_ca
+{
+    if(-d $ca_dir)
+    {
+        print "\nError: CA directory already exists!\n";
+        return;
+    }
+    
+    mkdir($ca_dir);
+    
+    my %dn = get_dn("C, ST, O, OU, CN, EA");
+    
+    # prepare configuration file for CA
+    my $cfg = "
+[ req ]
+default_md = sha256
+prompt = no
+req_extensions = v3_ca
+x509_extensions = v3_ca
+distinguished_name = req_distinguished_name
+
+[ v3_ca ]
+# Extensions for a typical CA
+
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always,issuer
+
+basicConstraints = critical,CA:true,pathlen:1
+
+# Key usage: this is typical for a CA certificate. 
+keyUsage = critical,keyCertSign,cRLSign
+
+[ req_distinguished_name ]
+";
+
+    $cfg .= "countryName = $dn{'C'}\n" if(defined $dn{'C'});
+    $cfg .= "stateOrProvinceName = $dn{'ST'}\n" if(defined $dn{'ST'});
+    $cfg .= "organizationName = $dn{'O'}\n" if(defined $dn{'O'});
+    $cfg .= "organizationalUnitName = $dn{'OU'}\n" if(defined $dn{'OU'});
+    $cfg .= "commonName = $dn{'CN'}\n" if(defined $dn{'CN'});
+    $cfg .= "emailAddress = $dn{'EA'}\n" if(defined $dn{'EA'});
+
+    my ($fh, $fn) = tempfile();
+    print $fh $cfg;
+    close $fh;
+    
+    # make new key and self-signed root CA certificate
+    # my $cmd = "openssl genpkey -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $ca_dir/$ca_key";
+    my $cmd = "openssl req -x509 -config $fn -sha256 -new -newkey rsa:4192 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer";
+    
+    print "\nRunning: $cmd\n";
+    
+    my $tmp = `$cmd 2>&1`;
+    unlink($fn);
+    
+    if(! -f "$ca_dir/$ca_key" || ! -f "$ca_dir/$ca_cer")
+    {
+        print "\nFailed to create CA key or certificate file\n";
+        return;
+    }
+    
+    
+    print "\nCreated CA key and certificate files\n";
+}
+
+
+
+# X509v3 Subject Alternative Name: 
+#  IP Address:12.34.56.78, DNS:ftp.example.com, IP Address:23.45.67.89, DNS:www.example.com
+sub parse_pem_get_san($)
+{
+    my $pem = shift;
+    my @tmp;
+    if($pem =~ /\.csr/)
+    {
+        @tmp = `openssl req -text -noout -in '$pem'`;
+    }
+    elsif($pem =~ /\.crt/)
+    {
+        @tmp = `openssl x509 -text -noout -in '$pem'`;
+    }
+    
+    my $signo = ($? & 127);
+    my $cd = ($? & 128) ? 'with' : 'without';
+    my $es = $? >> 8;
+    
+    if ($? == -1) { die "Failed to execute: $!" }   
+    elsif ($signo) { die "Child died with signal $signo, $cd coredump"; }
+    elsif($es > 0) { die "child exited with value $es"; }
+    
+    my $arm = 0;
+    foreach (@tmp)
+    {
+        chomp;
+        if(!$arm && m/Subject Alternative Name: *$/)
+        {
+            $arm = 1;
+        }
+        elsif($arm)
+        {
+            s/^ *//;
+            return '' if(!/^(IP|DNS)/);
+            @tmp = split(/, */);
+            my $ip = 0;
+            my $dns = 0;
+            my  $cfg = '
+subjectAltName = @alt_names
+[ alt_names ]
+';
+            foreach my $san (@tmp)
+            {
+                if($san =~ /^IP Address: *(\d+\.\d+\.\d+\.\d+)$/){ $cfg .= "IP.$ip = $1\n"; $ip++; }
+                elsif($san =~ /^IP Address: *([0-9a-fA-F.:]+)$/){ $cfg .= "IP.$ip = $1\n"; $ip++; }
+                elsif($san =~ /^DNS: *(.+)$/){ $cfg .= "DNS.$dns = $1\n"; $dns++; }
+            }
+            return $cfg;
+        }
+    }
+    
+    return '';
+}
+
+
+my %x509_ext_names = 
+(
+    'digital signature' => 'digitalSignature',
+    'key encipherment' => 'keyEncipherment',
+    'tls web server authentication' => 'serverAuth',
+    'tls web client authentication' => 'clientAuth',
+    'ocsp signing' => 'OCSPSigning',
+    'code signing' => 'codeSigning',
+    'e-mail protection' => 'emailProtection',
+    'ca:false' => 'CA:false',
+    'ca:true' => 'CA:true',
+);
+
+
+=pod
+X509v3 extensions:
+            X509v3 Key Usage: critical
+                Digital Signature, Key Encipherment
+            X509v3 Extended Key Usage:
+                TLS Web Server Authentication, TLS Web Client Authentication
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+X509v3 Subject Alternative Name: 
+ IP Address:12.34.56.78, DNS:ftp.example.com, IP Address:23.45.67.89, DNS:www.example.com
+=cut
+sub parse_pem_get_ext($)
+{
+    my $pem = shift;
+    my @tmp;
+    if($pem =~ /\.csr/)
+    {
+        @tmp = `openssl req -text -noout -in '$pem'`;
+    }
+    elsif($pem =~ /\.crt/)
+    {
+        @tmp = `openssl x509 -text -noout -in '$pem'`;
+    }
+    
+    my $signo = ($? & 127);
+    my $cd = ($? & 128) ? 'with' : 'without';
+    my $es = $? >> 8;
+    
+    if ($? == -1) { die "Failed to execute: $!" }   
+    elsif ($signo) { die "Child died with signal $signo, $cd coredump"; }
+    elsif($es > 0) { die "child exited with value $es"; }
+    
+    my $arm = 0;
+    my $cfg = '';
+    my $sancfg = '';
+    foreach (@tmp)
+    {
+        chomp;
+        s/^ *//;
+        
+# print "Line: $_\n";
+        if(!$arm && m/^ *x509v3/i)
+        {
+            $arm = 'KU' if(/^ *x509v3 key usage: *$/i);
+            $arm = 'KUC' if(/^ *x509v3 key usage: *critical *$/i);
+            $arm = 'EKU' if(/^ *x509v3 extended key usage: *$/i);
+            $arm = 'EKUC' if(/^ *x509v3 extended key usage: *critical *$/i);
+            $arm = 'BC' if(/^ *x509v3 basic constraints: *$/i);
+            $arm = 'BCC' if(/^ *x509v3 basic constraints: *critical *$/i);
+            $arm = 'SAN' if(/^ *x509v3 subject alternative name: *$/i);
+# print "ARM: $arm\n";
+        }
+        elsif($arm)
+        {
+            if($arm eq 'KU' or $arm eq 'KUC')
+            {
+                $cfg .= "\nkeyUsage=";
+                $cfg .= 'critical,' if($arm eq 'KUC');
+                # X509v3 Key Usage: critical\n  Digital Signature, Key Encipherment
+                my @T = split(/, */);
+                my $sep = '';
+                foreach (@T)
+                {
+                    s/^ *//;
+                    my $t = $x509_ext_names{lc($_)};
+                    next if(!$t);
+                    $cfg .= $sep . $t;
+                    $sep = ',';
+                }
+            }
+            elsif($arm eq 'EKU' or $arm eq 'EKUC')
+            {
+                $cfg .= "\nextendedKeyUsage=";
+                $cfg .= 'critical,' if($arm eq 'EKUC');
+                my @T = split(/, */);
+                my $sep = '';
+                foreach (@T)
+                {
+                    s/^ *//;
+                    my $t = $x509_ext_names{lc($_)};
+                    next if(!$t);
+                    $cfg .= $sep . $t;
+                    $sep = ',';
+                }
+            }
+            elsif($arm eq 'BC' or $arm eq 'BCC')
+            {
+                $cfg .= "\nbasicConstraints=";
+                $cfg .= 'critical,' if($arm eq 'BCC');
+                my @T = split(/, */);
+                my $sep = '';
+                foreach (@T)
+                {
+                    s/^ *//;
+                    my $t = $x509_ext_names{lc($_)};
+                    next if(!$t);
+                    $cfg .= $sep . $t;
+                    $sep = ',';
+                }
+            }
+            elsif($arm eq 'SAN')
+            {
+                my @T = split(/, */);
+                my $ip = 0;
+                my $dns = 0;
+                $sancfg = '
+subjectAltName = @alt_names
+[ alt_names ]
+';
+                foreach (@T)
+                {
+                    if(/^IP Address: *(\d+\.\d+\.\d+\.\d+)$/){ $sancfg .= "IP.$ip = $1\n"; $ip++; }
+                    elsif(/^IP Address: *([0-9a-fA-F.:]+)$/){ $sancfg .= "IP.$ip = $1\n"; $ip++; }
+                    elsif(/^DNS: *(.+)$/){ $sancfg .= "DNS.$dns = $1\n"; $dns++; }
+                }
+            }
+            $arm = 0;
+        }
+    }
+    
+    $cfg .= $sancfg;
+    return $cfg;
+}
+
+
+# https://security.stackexchange.com/questions/74345/provide-subjectaltname-to-openssl-directly-on-the-command-line
+sub make_new_crt
+{
+    my $selfsigned = shift;
+    my $csr = get_value(2);
+    my $crt;
+    my $key;
+    my $days;
+    
+    if($csr)
+    {
+        if($csr !~ /\.csr$/){ $csr = "$csr.csr"; }
+        if(! -f $csr)
+        {
+            print "\nError: Invalid CSR file '$csr'!\n";
+            return undef;
+        }
+        
+        $crt = $csr;
+        $crt =~ s/\.csr$//;
+        $crt = print_edit('CRT', $crt);
+        if($crt !~ /\.crt$/){ $crt = "$crt.crt"; }
+        
+        if(-f $crt)
+        {
+            print "\nError: CRT file '$crt' already exists\n";
+            return undef;
+        }
+        
+        $days = print_edit('Days', '365');
+        if($days !~ /^\d+$/)
+        {
+            print "\nError: Invalid validity days '$days'\n";
+            return undef;
+        }
+    }
+    else
+    {
+        $crt = print_edit('CRT');
+        if($crt !~ /\.crt$/){ $crt = "$crt.crt"; }
+        
+        if(-f $crt)
+        {
+            print "\nError: CRT file '$crt' already exists\n";
+            return undef;
+        }
+        
+        $days = print_edit('Days', '365');
+        if($days !~ /^\d+$/)
+        {
+            print "\nError: Invalid validity days '$days'\n";
+            return undef;
+        }
+        
+        $csr = $crt;
+        $csr =~ s/crt$/csr/;
+        $csr = make_new_csr($csr);
+        if(!$csr || ! -f $csr)
+        {
+            print "\nError: Invalid CSR file '$csr'\n";
+            return undef;
+        }
+    }
+    
+    if($selfsigned)
+    {
+        # self-signed cert
+        $key = $csr;
+        $key =~ s/csr$/key/;
+        
+        if(! -f $key)
+        {
+            print "Error: Failed to load KEY file '$key'!\n";
+            return undef;
+        }
+    }
+    
+    my $cfg = '
+[ req ]
+default_md = sha256
+req_extensions = req_ext
+x509_extensions = req_ext
+
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
+
+copy_extensions = copy
+
+[ req_ext ]';
+
+    #my $san = parse_pem_get_san($csr);
+    $cfg .= parse_pem_get_ext($csr);
+print "\nCFG: \n$cfg\n";
+
+    my ($fh, $fn) = tempfile();
+    print $fh $cfg;
+    close $fh;
+    
+    my $cmd;
+    if($selfsigned)
+    {
+        $cmd = "openssl req -x509 -config $fn -extensions req_ext -outform PEM -in '$csr' -key '$key' -nodes -nameopt utf8 -utf8 -days $days -out '$crt'";
+    }
+    else
+    {
+        $cmd = "openssl x509 -req -extfile $fn -extensions req_ext -outform PEM -in '$csr' -CA $ca_dir/$ca_cer -CAkey $ca_dir/$ca_key -CAcreateserial -days $days -out '$crt'";
+    }
+    print "\nRunning: $cmd\n";
+    my $tmp = `$cmd 2>&1`;
+    unlink($fn);
+    
+    if(! -f $crt)
+    {
+        print "Error: Failed to create certificate '$crt'!\n";
+        return undef;
+    }
+    
+    print "\nCreated certificate '$crt'!\n";
+    switch_menu_back();
+    return $crt;
+}
+
+
+
+###########################   MAIN MENU ENGINE CODE    ###########################
+
+switch_menu(\%main_menu);
+
+my $done = 0;
+
+while(!$done)
+{
+# print "Main Loop, current_menu: ", Dumper($current_menu);
+    
+    # print title
+    my $name = $current_menu->{'name'};
+    my $value = $current_menu->{'value'};
+    if(defined($value)) { print "\n$name ($value)\n"; }
+    else { print "\n$name \n"; }
+    
+    # print entries
+    my $i;
+    $entries = $current_menu->{'entries'};
+    my $limit = @{$entries};
+    
+    for($i = 0; $i < $limit; $i++)
+    {
+        $name = $entries->[$i]{'name'};
+        $value = $entries->[$i]{'value'};
+        if(defined($value)) { printf("% 2d: %s (%s)\n", $i + 1, $name, $value); }
+        else { printf("% 2d: %s\n", $i + 1, $name); }
+    }
+    printf(" q: Back\n");
+    
+    print " --> ";
+    
+    # make choice
+    my $choice;
+    while(!$done)
+    {
+        $choice = get_input();
+        last if($choice eq "q");
+        last if($choice =~ /^\d+$/o and $choice <= $limit);
+        print "Invalid Choice!\n --> ";
+    }
+    print "\n";
+
+    # we have valid choice in $choice
+    if($choice eq 'q')
+    {
+        print "\n";
+        # my $parent = $current_menu->{'parent'};
+        # last if(! $parent);
+        # $current_menu = $parent;
+        last if(! switch_menu_back());
+        next;
+    }
+    $current_index = $choice - 1;
+    $current_menu->{'current_index'} = $current_index;
+    my $sub = $entries->[$current_index]{'sub'};
+    my $arg = $entries->[$current_index]{'arg'};
+    (\&$sub)->($arg);
+}
+
+
+
+# get user input and chop off the newline
+sub get_input()
+{
+    my $input = '';
+    chomp($input = <STDIN>);
+    return $input;
+}
+
+# print text and get user input
+# if no imput return second argument (default value)
+sub print_edit
+{
+    my $text = shift;
+    my $default = shift;
+    
+    if(defined $default) { $text .= " [$default]"; }
+    else { $default = ''; }
+    
+    print "$text: --> ";
+    
+    $text = get_input();
+    return $text if($text ne '');
+    return $default;
+}
+
+
+sub switch_menu($)
+{
+    my $new_menu = shift;
+    $new_menu->{'parent'} = $current_menu;
+    $current_menu = $new_menu;
+}
+
+
+sub switch_menu_back()
+{
+    my $parent = $current_menu->{'parent'};
+    return undef if(!$parent);
+    $current_menu = $parent;
+    return 1;
+}
+
+
+
+sub set_value
+{
+    my $val = shift;
+    my $menu = shift || $current_menu->{'parent'};
+    
+    return if(! $menu);
+    
+    my $i;
+    my $entries = $menu->{'entries'};
+=pod
+    my $limit = @{$entries};
+    
+    for($i = 0; $i < $limit; $i++)
+    {
+        $entries->[$i]{'value'} = undef;
+    }
+=cut
+    $i = $menu->{'current_index'};
+    $entries->[$i]{'value'} = $val;
+}
+
+
+
+sub get_value_from_menu
+{
+    my $menu = shift;
+    my $argc = @_;
+    my $i = shift;
+    my $entries = $menu->{'entries'};
+    if($argc == 1)
+    {
+        return $entries->[$i]{'value'} || '';
+    }
+
+    return get_value_from_menu($entries->[$i]{'arg'}, @_);
+}
+
+
+sub get_value
+{
+    return get_value_from_menu($current_menu, @_);
+}
