@@ -1,5 +1,5 @@
 # ssl-menu
-## Version 1.0.0
+## Version 1.0.1
 
 
 This is a simple Perl script for SSL certificate management. 
@@ -84,7 +84,7 @@ openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out $csr $
 
 make new CA
 ```sh
-openssl req -x509 -config $fn -sha256 -new -newkey rsa:4192 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
+openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
 ```
 
 make new CRT

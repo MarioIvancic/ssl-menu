@@ -18,7 +18,7 @@ sub get_value;
 
 #########################    APPLICATION CODE    #########################
 
-my $version = 'v1.0.0';
+my $version = 'v1.0.1';
 
 sub print_help
 {
@@ -87,7 +87,7 @@ make new CSR
 openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out $csr $key
 
 make new CA
-openssl req -x509 -config $fn -sha256 -new -newkey rsa:4192 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
+openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
 
 make new CRT
 openssl req -x509 -config $fn -extensions req_ext -outform PEM -in $csr -key $key -nodes -nameopt utf8 -utf8 -days $days -out $crt
@@ -1175,7 +1175,7 @@ keyUsage = critical,keyCertSign,cRLSign
     
     # make new key and self-signed root CA certificate
     # my $cmd = "openssl genpkey -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $ca_dir/$ca_key";
-    my $cmd = "openssl req -x509 -config $fn -sha256 -new -newkey rsa:4192 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer";
+    my $cmd = "openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer";
     
     print "\nRunning: $cmd\n";
     
