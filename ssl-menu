@@ -18,7 +18,7 @@ sub get_value;
 
 #########################    APPLICATION CODE    #########################
 
-my $version = 'v1.0.1';
+my $version = 'v1.0.2';
 
 sub print_help
 {
