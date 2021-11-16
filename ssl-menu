@@ -1092,7 +1092,7 @@ subjectAltName = @alt_names
         }
     }
     
- # print "CFG: $cfg\n\n";
+# print "CFG: $cfg\n\n";
 
     my ($fh, $fn) = tempfile();
     print $fh $cfg;
@@ -1481,7 +1481,7 @@ copy_extensions = copy
 
     #my $san = parse_pem_get_san($csr);
     $cfg .= parse_pem_get_ext($csr);
-print "\nCFG: \n$cfg\n";
+# print "\nCFG: \n$cfg\n";
 
     my ($fh, $fn) = tempfile();
     print $fh $cfg;
