@@ -3,6 +3,7 @@
 #########################    MENU ENGINE CODE    #########################
 
 use File::Temp qw/ tempfile /;
+use File::Copy;
 use Data::Dumper;
 
 my $current_menu;
@@ -18,7 +19,7 @@ sub get_value;
 
 #########################    APPLICATION CODE    #########################
 
-my $version = 'v1.0.2';
+my $version = 'v1.0.3';
 
 sub print_help
 {
@@ -37,9 +38,9 @@ Default encoding is PEM for all KEY, CSR, CRT, but DER can be used too.
 Certificate can also be converted to/from PKCS#12 encoding.
 Files will have extensions key, pub.key, crt, csr, depending on file type.
 
-CA KEY will be 4096 bit RSA key. All other keys will default to 2048 bits 
-RSA keys, but can be any of 512, 1024, 2048, 4096 bits for RSA ans DSA
-or 256 bits for EC and ED.
+CA KEY will be 4096 bit RSA key by default, but it can be any other valid KEY. 
+All other keys will default to 2048 bits RSA keys, but can be any of 512, 
+1024, 2048, 4096 bits for RSA ans DSA or 256 bits for EC and ED.
 
 Conversion from CRT to CSR is not fully functional in openssl v1.x.x.
 ";
@@ -53,45 +54,45 @@ Conversion from CRT to CSR is not fully functional in openssl v1.x.x.
 Openssl commands
 
 print KEY:
-openssl pkey -text -noout -in $key
+	openssl pkey -text -noout -in $key
 
 print CRT
-openssl x509 -text -noout -in $crt
+	openssl x509 -text -noout -in $crt
 
 print CSR
-openssl req -text -noout -in $csr
+	openssl req -text -noout -in $csr
     
 convert KEY from PEM/DER to DER/PEM
-openssl pkey -inform $infmt -in $inkey -outform $outfmt -out $outkey
+	openssl pkey -inform $infmt -in $inkey -outform $outfmt -out $outkey
 
 convert CSR from PEM/DER to DER/PEM
-openssl req -inform $infmt -in $incsr -outform $outfmt -out $outcsr
+	openssl req -inform $infmt -in $incsr -outform $outfmt -out $outcsr
 
 convert CSR from PEM to P12
-openssl pkcs12 -export -name $name -inkey $inkey -in $incrt -out $outcrt
+	openssl pkcs12 -export -name $name -inkey $inkey -in $incrt -out $outcrt
 
 convert CRT from p12 to PEM
-openssl pkcs12 -nocerts -nodes -in $incrt -out $outkey
-openssl pkcs12 -nokeys -clcerts -in $incrt -out $outcrt
+	openssl pkcs12 -nocerts -nodes -in $incrt -out $outkey
+	openssl pkcs12 -nokeys -clcerts -in $incrt -out $outcrt
 
 convert CRT from PEM/DER to DER/PEM
-openssl req -inform $infmt -in $incrt -outform $outfmt -out $outcrt
+	openssl req -inform $infmt -in $incrt -outform $outfmt -out $outcrt
 
 convert CRT to CSR
-openssl x509 -x509toreq -extfile $fn -extensions crt_ext -inform PEM -in $crt -signkey $key -outform PEM -out $csr
+	openssl x509 -x509toreq -extfile $fn -extensions crt_ext -inform PEM -in $crt -signkey $key -outform PEM -out $csr
 
 make new KEY
-openssl pkey -inform $fmt -outform $fmt -in $key -pubout $opts -out $pubkey
+	openssl genpkey -outform $fmt -algorithm $alg $opts -out '$key'
 
 make new CSR
-openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out $csr $key
+	openssl req -new -nodes -config $fn -nameopt utf8 -utf8 -outform PEM -out $csr $key
 
 make new CA
-openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
+	openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer
 
 make new CRT
-openssl req -x509 -config $fn -extensions req_ext -outform PEM -in $csr -key $key -nodes -nameopt utf8 -utf8 -days $days -out $crt
-openssl x509 -req -extfile $fn -extensions req_ext -outform PEM -in $csr -CA $ca_dir/$ca_cer -CAkey $ca_dir/$ca_key -CAcreateserial -days $days -out $crt
+	openssl req -x509 -config $fn -extensions req_ext -outform PEM -in $csr -key $key -nodes -nameopt utf8 -utf8 -days $days -out $crt
+	openssl x509 -req -extfile $fn -extensions req_ext -outform PEM -in $csr -CA $ca_dir/$ca_cer -CAkey $ca_dir/$ca_key -CAcreateserial -days $days -out $crt
 
 =cut
 
@@ -99,7 +100,7 @@ openssl x509 -req -extfile $fn -extensions req_ext -outform PEM -in $csr -CA $ca
 
 my $ca_dir = 'CA';
 my $ca_key = 'ca.key';
-my $ca_cer = 'ca.cer';
+my $ca_cer = 'ca.crt';
 
 my %file_extensions =
 (
@@ -161,6 +162,8 @@ my %key_type_menu =
         {'name' => 'DSA, 4096 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'DSA, 4096'},
 
         {'name' => 'ED25519, 256 bits', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'ED25519, 256'},
+        
+        {'name' => 'EC, curve P-256', 'sub' => sub { set_value($_[0]); switch_menu_back(); }, 'arg' => 'EC, P-256'},
     ],
 );
 
@@ -201,6 +204,17 @@ my %csr_menu =
     [
         {'name' => 'Make CSR', 'sub' => \&make_new_csr, 'arg' => undef},
         {'name' => 'Set CSR type', 'sub' => \&switch_menu, 'arg' => \%crt_type_menu},
+        {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
+    ],
+);
+
+
+my %ca_menu =
+(
+    'name' => 'CA menu',
+    'entries' =>
+    [
+        {'name' => 'Make CA', 'sub' => \&make_new_ca, 'arg' => undef},
         {'name' => 'Load KEY', 'sub' => sub { set_value(print_edit('KEY'), $current_menu); }, 'arg' => undef},
     ],
 );
@@ -322,7 +336,7 @@ my %main_menu =
         {'name' => 'New CRT', 'sub' => \&switch_menu, 'arg' => \%crt_menu},
         {'name' => 'New CSR', 'sub' => \&switch_menu, 'arg' => \%csr_menu},
         {'name' => 'New KEY', 'sub' => \&switch_menu, 'arg' => \%key_menu},
-        {'name' => 'New CA', 'sub' => \&make_new_ca, 'arg' => undef},
+        {'name' => 'New CA', 'sub' => \&switch_menu, 'arg' => \%ca_menu},
         {'name' => 'Print', 'sub' => \&switch_menu, 'arg' => \%print_menu},
         {'name' => 'Convert', 'sub' => \&switch_menu, 'arg' => \%convert_menu},
         {'name' => 'Help', 'sub' => \&print_help, 'arg' => undef},
@@ -365,6 +379,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /C,/)
     {
         $tmp = print_edit('Country Name (2 letter code)', 'AU');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'C'} = $tmp;
     }
@@ -372,6 +388,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /ST,/)
     {
         $tmp = print_edit('State or Province Name (full name)', 'Some-State');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'ST'} = $tmp;
     }
@@ -379,6 +397,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /L,/)
     {
         $tmp = print_edit('Locality Name (eg, city)');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'L'} = $tmp;
     }
@@ -386,6 +406,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /O,/)
     {
         $tmp = print_edit('Organization Name (eg, company)', 'Example Ltd');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'O'} = $tmp;
     }
@@ -393,6 +415,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /OU,/)
     {
         $tmp = print_edit('Organizational Unit Name (eg, section)');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'OU'} = $tmp;
     }
@@ -400,6 +424,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /CN,/)
     {
         $tmp = print_edit('Common Name (e.g. server FQDN or YOUR name)');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'CN'} = $tmp;
     }
@@ -407,6 +433,8 @@ If you enter '.', the field will be left blank.
     if($fields =~ /SAN,/)
     {
         $tmp = print_edit('Alternate Names (e.g. DNS name or IP, comma separated)');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'SAN'} = $tmp;
     }
@@ -414,9 +442,39 @@ If you enter '.', the field will be left blank.
     if($fields =~ /EA,/)
     {
         $tmp = print_edit('Email Address');
+        $tmp =~ s/^\s*//;
+        $tmp =~ s/\s*$//;
         $tmp = undef if($tmp eq '' or $tmp eq '.');
         $DN{'EA'} = $tmp;
     }
+    
+    # if we have SAN we have to trim spaces around SAN fields
+    if(defined($DN{'SAN'}))
+    {
+		my @sc = split(/ *, */, $DN{'SAN'});
+		my $newsan = '';
+		my $comma = '';
+		
+		# if we have CN we have to include CN in SAN list and delete CN field
+		my $cn = '';
+		if(defined($DN{'CN'}))
+		{
+			$cn = $DN{'CN'};
+			$DN{'CN'} = undef;
+		}
+		
+		foreach my $san (@sc)
+        {
+			next if($san eq $cn);
+			$newsan .= $comma;
+			$newsan .= $san;
+			$comma = ',';
+        }
+        
+        $newsan .= ",$cn" if($cn ne '');
+        
+        $DN{'SAN'} = $newsan;
+	}
     
     return %DN;
 }
@@ -901,6 +959,10 @@ sub make_new_key
     {
         $opts .= " -pkeyopt dsa_paramgen_bits:$len";
     }
+    elsif($alg eq 'EC')
+    {
+        $opts .= " -pkeyopt ec_paramgen_curve:$len";
+    }
     
     my $fn;
     if($pass)
@@ -1073,7 +1135,8 @@ subjectAltName = @alt_names
         my $ip = 0;
         my $dns = 0;
         
-        $san = "$dn{'CN'}," . $san;
+        # this is moved to get_dn() function
+        # $san = "$dn{'CN'}," . $san;
         
         my @sc = split(/, */, $san);
         
@@ -1137,6 +1200,29 @@ sub make_new_ca
     
     mkdir($ca_dir);
     
+    my $key = get_value(1);
+    if($key)
+    {
+        if($key !~ /\.key$/){ $key = "$key.key"; }
+        
+        if(! -f $key)
+        {
+            print "\nError: Failed to load KEY file '$key'\n";
+            return undef;
+        }
+        move($key, "$ca_dir/$ca_key");
+        if(! -f "$ca_dir/$ca_key")
+        {
+            print "\nError: Failed to move KEY file '$key'\n";
+            return undef;
+        }
+        $key = "-key $ca_dir/$ca_key";
+    }
+    else
+    {
+        $key = "-newkey rsa:4096 -keyout $ca_dir/$ca_key";
+    }
+    
     my %dn = get_dn("C, ST, O, OU, CN, EA");
     
     # prepare configuration file for CA
@@ -1173,9 +1259,9 @@ keyUsage = critical,keyCertSign,cRLSign
     print $fh $cfg;
     close $fh;
     
-    # make new key and self-signed root CA certificate
+    # make self-signed root CA certificate using supplied KEY or new RSA KEY
     # my $cmd = "openssl genpkey -outform PEM -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out $ca_dir/$ca_key";
-    my $cmd = "openssl req -x509 -config $fn -sha256 -new -newkey rsa:4096 -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 -keyout $ca_dir/$ca_key -out $ca_dir/$ca_cer";
+    my $cmd = "openssl req -x509 -config $fn -sha256 -new -nodes -nameopt utf8 -utf8 -outform PEM -days 9999 $key -out $ca_dir/$ca_cer";
     
     print "\nRunning: $cmd\n";
     
@@ -1190,6 +1276,8 @@ keyUsage = critical,keyCertSign,cRLSign
     
     
     print "\nCreated CA key and certificate files\n";
+    switch_menu_back();
+    return "$ca_dir/$ca_key";
 }
 
 
