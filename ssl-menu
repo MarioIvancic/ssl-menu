@@ -19,7 +19,11 @@ sub get_value;
 
 #########################    APPLICATION CODE    #########################
 
-my $version = 'v1.0.3';
+my $version = 'v1.0.4';
+
+# when SAN is used CN value will be inserted into SAN list.
+# when this is 1 then CN will be deleted after insertion.
+my $delete_cn_if_in_san = 0;
 
 sub print_help
 {
@@ -40,7 +44,7 @@ Files will have extensions key, pub.key, crt, csr, depending on file type.
 
 CA KEY will be 4096 bit RSA key by default, but it can be any other valid KEY. 
 All other keys will default to 2048 bits RSA keys, but can be any of 512, 
-1024, 2048, 4096 bits for RSA ans DSA or 256 bits for EC and ED.
+1024, 2048, 4096 bits for RSA and DSA or 256 bits for EC and ED.
 
 Conversion from CRT to CSR is not fully functional in openssl v1.x.x.
 ";
@@ -460,7 +464,7 @@ If you enter '.', the field will be left blank.
 		if(defined($DN{'CN'}))
 		{
 			$cn = $DN{'CN'};
-			$DN{'CN'} = undef;
+			$DN{'CN'} = undef if($delete_cn_if_in_san);
 		}
 		
 		foreach my $san (@sc)
@@ -1749,3 +1753,4 @@ sub get_value
 {
     return get_value_from_menu($current_menu, @_);
 }
+
